@@ -7,14 +7,15 @@ TERMINAL = {"DONE", "ERROR"}
 
 async def wait_dataset_files_status(
     uow,
-    fms,                             
+    fms,                               # должен иметь get_dataset_files_info(dataset_uuid)
     dataset_uuid: UUID,
     *,
-    main_files: Dict[UUID, UUID],        
-    attachment_files: Dict[UUID, UUID],  
+    main_files: Dict[UUID, UUID],        # file_uuid -> doc_uuid
+    attachment_files: Dict[UUID, UUID],  # file_uuid -> att_uuid
     interval_sec: int = 30,
-    timeout_sec: Optional[int] = None,   
+    timeout_sec: Optional[int] = None,   # None -> ждать бесконечно
 ) -> Dict[UUID, str]:
+    # ключи — строки, т.к. из JSON приходят строки
     watch_main = {str(k): v for k, v in main_files.items()}
     watch_att  = {str(k): v for k, v in attachment_files.items()}
     watched = set(watch_main) | set(watch_att)
@@ -42,24 +43,30 @@ async def wait_dataset_files_status(
     if timeout_sec is None:
         await _loop()
     else:
-        async with asyncio.timeout(timeout_sec):
-            await _loop()
+        # для Python < 3.11
+        await asyncio.wait_for(_loop(), timeout=timeout_sec)
 
+    # --- фиксация в БД: получаем модели по UUID и присваиваем поля ---
     now = datetime.now(getattr(settings, "DEFAULT_TIMEZONE", None))
     for fu, st in final_status.items():
         fu_str = str(fu)
+        status_str = "success" if st == "DONE" else "error"
+
         if fu_str in watch_main:
-            await uow.document_repo.update_download_status(
-                watch_main[fu_str],
-                "success" if st == "DONE" else "error",
-                now,
-            )
+            doc_uuid = watch_main[fu_str]
+            doc = await uow.document_repo.get_by_uuid(doc_uuid)
+            if doc is not None:
+                doc.download_status = status_str
+                # если у модели есть поле времени загрузки — раскомментируйте
+                # doc.downloaded_at = now
+
         elif fu_str in watch_att:
-            await uow.attachment_repo.update_download_status(
-                watch_att[fu_str],
-                "success" if st == "DONE" else "error",
-                now,
-            )
+            att_uuid = watch_att[fu_str]
+            att = await uow.attachment_repo.get_by_uuid(att_uuid)
+            if att is not None:
+                att.download_status = status_str
+                # если у модели есть поле времени загрузки — раскомментируйте
+                # att.downloaded_at = now
 
     await uow.commit()
     return final_status
